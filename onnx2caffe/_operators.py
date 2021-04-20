@@ -50,11 +50,18 @@ def _convert_conv(node, graph, err):
     pads = node.attrs.get("pads", [0, 0, 0, 0])
     strides = node.attrs["strides"]
 
-    layer = myf("Convolution", node_name, [input_name], [output_name],
-                kernel_h = kernel_shape[0],kernel_w = kernel_shape[1],
-                stride_h=strides[0], stride_w = strides[1], group = groups,
-                pad_h = pads[0], pad_w = pads[1],
-                num_output=W.shape[0],  dilation = dilations[0], bias_term = bias_flag)
+    if groups > 1:
+        layer = myf("Convolution", node_name, [input_name], [output_name],
+                    kernel_h = kernel_shape[0],kernel_w = kernel_shape[1],
+                    stride_h=strides[0], stride_w = strides[1], group = groups,
+                    pad_h = pads[0], pad_w = pads[1],
+                    num_output=W.shape[0],  dilation = dilations[0], bias_term = bias_flag, engine=1)
+    else:
+        layer = myf("Convolution", node_name, [input_name], [output_name],
+                    kernel_h = kernel_shape[0],kernel_w = kernel_shape[1],
+                    stride_h=strides[0], stride_w = strides[1], group = groups,
+                    pad_h = pads[0], pad_w = pads[1],
+                    num_output=W.shape[0],  dilation = dilations[0], bias_term = bias_flag)
 
     graph.channel_dims[output_name] = W.shape[0]
     return layer
@@ -152,19 +159,34 @@ def _convert_Mul(node,graph,err):
     #     if graph.channel_dims[name]>max_dim:
     #         max_dim = graph.channel_dims[name]
 
-    if 'broadcast' in node.attrs:
-        if node.attrs['broadcast'] == 1:
-            input_node_number = len(input_name_list)
-            if input_node_number !=2:
-                return err.unsupported_op_configuration(node, "Broadcast Mul must has 2 input, not {}".format(input_node_number))
-            axis = node.attrs['axis']
-            flat_layer = myf("Flatten",node_name+'_flat',[input_name_list[1]],[output_name+'_flat'])
-            layer = myf("Scale", node_name, [input_name_list[0],output_name+'_flat'], [output_name], bias_term = False, axis = axis)
-            graph.channel_dims[output_name] = graph.channel_dims[input_name_list[0]]
-            return flat_layer,layer
+    broadcast = False
+    for input_ in input_name_list[1:]:
+        if graph.shape_dict[input_] != graph.shape_dict[input_name_list[0]]:
+            broadcast = True
+    if broadcast:
+        input_node_number = len(input_name_list)
+        if input_node_number !=2:
+            return err.unsupported_op_configuration(node, "Broadcast Mul must has 2 input, not {}".format(input_node_number))
+        flat_layer = myf("Flatten",node_name+'_flat',[input_name_list[1]],[output_name+'_flat'])
+        layer = myf("Scale", node_name, [input_name_list[0],output_name+'_flat'], [output_name], bias_term = False, axis = 0)
+        graph.channel_dims[output_name] = graph.channel_dims[input_name_list[0]]
+        return flat_layer,layer
 
     layer = myf("Eltwise",node_name,input_name_list,[output_name],operation=P.Eltwise.PROD)
     graph.channel_dims[output_name] = graph.channel_dims[input_name_list[0]]
+    return layer
+
+def _convert_unsqueeze(node,graph,err):
+    node_name = node.name
+    input_name = str(node.inputs[0])
+    output_name = str(node.outputs[0])
+    shape = graph.shape_dict[output_name]
+    # print('[YTADD] {}: ({}: {}, {}: {})'.format(node_name, input_name, graph.shape_dict[input_name],
+    #     output_name, graph.shape_dict[output_name]))
+    # print(node.attrs)
+
+    graph.channel_dims[output_name] = shape[1]
+    layer = myf("Reshape", node_name, [input_name], [output_name], reshape_param = dict(shape=dict(dim=list(shape))))
     return layer
 
 def _convert_Reshape(node,graph,err):
@@ -217,17 +239,22 @@ def _convert_pool(node,graph,err):
     else:
         return err.unsupported_op_configuration(node,  "Unsupported pool type")
 
-    kernel_shape = node.attrs["kernel_shape"]
-    strides = node.attrs.get('strides', [1, 1])
-    pads = node.attrs.get('pads', [0, 0, 0, 0])
-
-    layer = myf("Pooling",node_name,[input_name],[output_name],pooling_param = dict(pool = pool_type,
-                                                                                    kernel_h = kernel_shape[0],
-                                                                                    kernel_w = kernel_shape[1],
-                                                                                    stride_h = strides[0],
-                                                                                    stride_w = strides[1],
-                                                                                    pad_h = pads[0],
-                                                                                    pad_w = pads[1]))
+    global_ = node.op_type.startswith('Global')
+    if global_:
+        layer = myf("Pooling",node_name,[input_name],[output_name],pooling_param = dict(pool = pool_type,
+                                                                                        global_pooling = True))
+    else:
+        kernel_shape = node.attrs["kernel_shape"]
+        strides = node.attrs.get('strides', [1, 1])
+        pads = node.attrs.get('pads', [0, 0, 0, 0])
+        layer = myf("Pooling",node_name,[input_name],[output_name],
+                    pooling_param = dict(pool = pool_type,
+                    kernel_h = kernel_shape[0],
+                    kernel_w = kernel_shape[1],
+                    stride_h = strides[0],
+                    stride_w = strides[1],
+                    pad_h = pads[0],
+                    pad_w = pads[1]))
     graph.channel_dims[output_name] = graph.channel_dims[input_name]
     return layer
 
@@ -238,6 +265,23 @@ def _convert_dropout(node,graph,err):
     ratio = node.attrs.get('ratio', 0.5)
     layer = myf("Dropout", node_name, [input_name], [output_name], dropout_ratio =ratio)
     graph.channel_dims[output_name] = graph.channel_dims[input_name]
+    return layer
+
+def _convert_matmul(node,graph,err):
+    node_name = node.name
+    input_name = str(node.inputs[0])
+    output_name = str(node.outputs[0])
+    weight_name = node.inputs[1]
+    if weight_name in node.input_tensors:
+        W = node.input_tensors[weight_name]
+    else:
+        err.missing_initializer(node,
+                                "Weight tensor: {} not found in the graph initializer".format(weight_name, ))
+        return
+
+    layer = myf("InnerProduct",node_name,[input_name],[output_name],num_output = W.shape[1],bias_term = False)
+    graph.channel_dims[output_name] = W.shape[0]
+
     return layer
 
 def _convert_gemm(node,graph,err):
@@ -252,8 +296,8 @@ def _convert_gemm(node,graph,err):
                                 "Weight tensor: {} not found in the graph initializer".format(weight_name, ))
         return
 
-    if node.attrs["broadcast"] != 1 or node.attrs["transB"] != 1:
-        return err.unsupported_op_configuration(node,"Gemm is supported only for inner_product layer")
+    # if node.attrs["broadcast"] != 1 or node.attrs["transB"] != 1:
+    #     return err.unsupported_op_configuration(node,"Gemm is supported only for inner_product layer")
 
     b = None
     bias_flag = False
@@ -322,7 +366,8 @@ def _convert_concat(node,graph,err):
     if axis == 1:
         dim = 0
         for name in input_name_list:
-            dim+=graph.channel_dims[name]
+            # dim+=graph.channel_dims[name]
+            dim+=graph.shape_dict[name][1]
         graph.channel_dims[output_name] = dim
     else:
         graph.channel_dims[output_name] = graph.channel_dims[input_name_list[0]]
@@ -390,11 +435,14 @@ _ONNX_NODE_REGISTRY = {
     "Reshape": _convert_Reshape,
     "MaxPool": _convert_pool,
     "AveragePool": _convert_pool,
+    "GlobalAveragePool": _convert_pool,
     "Dropout": _convert_dropout,
     "Gemm": _convert_gemm,
+    "MatMul": _convert_matmul,
     "Upsample": _convert_upsample,
     "Concat": _convert_concat,
     "ConvTranspose": _convert_conv_transpose,
     "Sigmoid": _convert_sigmoid,
     "Flatten": _convert_Flatten,
+    "Unsqueeze": _convert_unsqueeze,
 }

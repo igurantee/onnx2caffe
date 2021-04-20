@@ -65,8 +65,21 @@ def _convert_Flatten(net, node, graph, err):
 def _convert_pool(net, node, graph, err):
     pass
 
+def _convert_unsqueeze(net, node, graph, err):
+    pass
+
 def _convert_dropout(net, node, graph, err):
     pass
+
+def _convert_matmul(net, node, graph, err):
+    node_name = node.name
+    weight_name = node.inputs[1]
+    if weight_name in node.input_tensors:
+        W = node.input_tensors[weight_name]
+    else:
+        err.missing_initializer(node,
+                                "Weight tensor: {} not found in the graph initializer".format(weight_name, ))
+    net.params[node_name][0].data[...] = W.T
 
 def _convert_gemm(net, node, graph, err):
     node_name = node.name
@@ -76,8 +89,8 @@ def _convert_gemm(net, node, graph, err):
     else:
         err.missing_initializer(node,
                                 "Weight tensor: {} not found in the graph initializer".format(weight_name, ))
-    if node.attrs["broadcast"] != 1 or node.attrs["transB"] != 1:
-        return err.unsupported_op_configuration(node, "Gemm is supported only for inner_product layer")
+    # if node.attrs["broadcast"] != 1 or node.attrs["transB"] != 1:
+    #     return err.unsupported_op_configuration(node, "Gemm is supported only for inner_product layer")
     b = None
     if len(node.inputs) > 2:
         b = node.input_tensors[node.inputs[2]]
@@ -133,13 +146,14 @@ _ONNX_NODE_REGISTRY = {
     "Reshape": _convert_Reshape,
     "MaxPool": _convert_pool,
     "AveragePool": _convert_pool,
+    "GlobalAveragePool": _convert_pool,
     "Dropout": _convert_dropout,
     "Gemm": _convert_gemm,
+    "MatMul": _convert_matmul,
     "Upsample": _convert_upsample,
     "Concat": _convert_concat,
     "ConvTranspose": _convert_conv_transpose,
     "Sigmoid": _convert_sigmoid,
     "Flatten": _convert_Flatten,
+    "Unsqueeze": _convert_unsqueeze,
 }
-
-

@@ -70,7 +70,8 @@ def convertToCaffe(graph, prototxt_save_path, caffe_model_save_path):
     with open(prototxt_save_path, 'w') as f:
         print(net,file=f)
 
-    caffe.set_mode_cpu()
+    caffe.set_mode_gpu()
+    caffe.set_device(0)
     deploy = prototxt_save_path
     net = caffe.Net(deploy,
                     caffe.TEST)
